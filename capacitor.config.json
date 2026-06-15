@@ -1,0 +1,8 @@
+{
+  "appId": "ro.brandmotion.pepsihouse",
+  "appName": "Pepsi House",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": true
+  }
+}
