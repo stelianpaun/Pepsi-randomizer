@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+  <meta name="theme-color" content="#0008c8"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <title>Pepsi House</title>
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+    html,body{height:100%;overflow:hidden;-webkit-tap-highlight-color:transparent;background:#0008c8;}
+    body{font-family:'Arial Black','Arial',Helvetica,system-ui,sans-serif;}
+    #root{height:100vh;width:100vw;}
+    ::placeholder{color:rgba(255,255,255,0.5);}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useRef, useEffect, useCallback } = React;
+
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
+const ADMIN_PWD   = "admin123";              // schimbă înainte de eveniment
+const STORAGE_KEY = "pepsiRandomizer_v1";
+const PEPSI_BLUE  = "#0008c8";
+const PEPSI_RED   = "#EB1933";
+
+const INITIAL_PRIZES = [
+  { id: 1, name: "VOUCHER 100 RON", qty: 5  },
+  { id: 2, name: "TRICOU PEPSI",    qty: 10 },
+  { id: 3, name: "STICLĂ PEPSI",    qty: 20 },
+  { id: 4, name: "CASCĂ BLUETOOTH", qty: 3  },
+];
+
+// Coordonate din grafica originală (spațiu 1920×1080) — totul aliniat fix pe poză
+const D = {
+  boxL:   497/1920*100,           // % stânga cutie centrală
+  boxW:   925/1920*100,           // % lățime cutie
+  boxT:   733/1080*100,           // % sus cutie
+  boxH:  (817-733)/1080*100,      // % înălțime cutie
+  rowH:   75/1080*100,            // % distanță între rânduri
+  cy:     777/1080*100,           // % centru vertical reel
+  startT: 730/1080*100,           // % zona clicabilă START
+  startH:(820-730)/1080*100,
+  startL: 490/1920*100,
+  startW: 940/1920*100,
+};
+
+// ─── PERSISTENCE ─────────────────────────────────────────────────────────────
+function loadPrizes(){
+  try { const r = localStorage.getItem(STORAGE_KEY); if (r) return JSON.parse(r); } catch(e){}
+  return null;
+}
+
+// ─── STAGE (păstrează raportul 16:9, nu distorsionează niciodată) ─────────────
+function Stage({ bg, scale, setScale, children, onSecretTap }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const update = () => setScale(el.clientWidth / 1920);
+    update();
+    const ro = new ResizeObserver(update); ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <div style={{position:"fixed",inset:0,background:PEPSI_BLUE,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div ref={ref} style={{
+        position:"relative",
+        width:"min(100vw, 177.78vh)",
+        aspectRatio:"16 / 9",
+        backgroundImage:`url(${bg})`,
+        backgroundSize:"100% 100%",
+        backgroundPosition:"center",
+        overflow:"hidden",
+        userSelect:"none",
+      }}>
+        {onSecretTap && <div onClick={onSecretTap}
+          style={{position:"absolute",top:0,right:0,width:"8%",height:"14%",zIndex:50}}/>}
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─── START SCREEN ────────────────────────────────────────────────────────────
+function StartScreen({ scale, setScale, onStart, onSecretTap }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <Stage bg="assets/bg_start.jpg" scale={scale} setScale={setScale} onSecretTap={onSecretTap}>
+      {/* zonă clicabilă peste butonul START din grafică */}
+      <div
+        onClick={onStart}
+        onPointerDown={()=>setHover(true)} onPointerUp={()=>setHover(false)} onPointerLeave={()=>setHover(false)}
+        style={{
+          position:"absolute",
+          left:`${D.startL}%`, top:`${D.startT}%`,
+          width:`${D.startW}%`, height:`${D.startH}%`,
+          cursor:"pointer", zIndex:10,
+          background: hover ? "rgba(255,255,255,0.10)" : "transparent",
+          borderRadius: 6*scale,
+          transition:"background 0.12s ease",
+        }}
+      />
+    </Stage>
+  );
+}
+
+// ─── RESULT / REEL SCREEN ──────────────────────────────────────────────────────
+function ResultScreen({ scale, setScale, prizes, onWin, onBack, onSecretTap }) {
+  const [scroll, setScroll]   = useState(0);
+  const [names, setNames]     = useState([]);
+  const [winner, setWinner]   = useState(null);   // {id,name} sau {name:"STOC EPUIZAT"}
+  const [revealed, setReveal] = useState(false);
+  const raf = useRef(null);
+  const HALF = 2;
+
+  const pickName = useCallback((pool) => pool[Math.floor(Math.random()*pool.length)].name, []);
+
+  useEffect(() => {
+    const pool = prizes.filter(p => p.qty > 0);
+    if (pool.length === 0) { setWinner({ name:"STOC EPUIZAT" }); setReveal(true); return; }
+
+    const win = pool[Math.floor(Math.random()*pool.length)];
+    // construim secvența reel-ului; câștigătorul aterizează la indexul țintă
+    const seq = [];
+    for (let i=0;i<28;i++) seq.push(pickName(pool));
+    const target = seq.length;          // poziția câștigătorului
+    seq.push(win.name);
+    for (let i=0;i<HALF+2;i++) seq.push(pickName(pool)); // rânduri estompate dedesubt
+    setNames(seq); setWinner(win);
+
+    const from = HALF, to = target, dur = 2700, t0 = performance.now();
+    const easeOut = t => 1 - Math.pow(1-t, 3);
+    const frame = (now) => {
+      const t = Math.min(1, (now-t0)/dur);
+      setScroll(from + (to-from)*easeOut(t));
+      if (t < 1) raf.current = requestAnimationFrame(frame);
+      else { onWin(win.id); setReveal(true); }
+    };
+    raf.current = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf.current);
+  }, []);
+
+  // rândurile vizibile în jurul centrului
+  const rows = [];
+  const base = Math.round(scroll);
+  for (let off=-HALF-1; off<=HALF+1; off++) {
+    const idx = base + off;
+    const dist = idx - scroll;                       // distanța față de centru
+    if (Math.abs(dist) > HALF+0.6) continue;
+    const ad = Math.abs(dist);
+    const op = ad < 0.5 ? 1 : Math.max(0, 1 - ad*0.42);
+    const isCenter = ad < 0.5;
+    rows.push({ idx, dist, op, isCenter, name: names[idx] || "" });
+  }
+
+  const px = v => v*scale;
+  const fontMain   = px(54);
+  const fontFaded  = px(50);
+
+  return (
+    <Stage bg="assets/bg_clean.jpg" scale={scale} setScale={setScale} onSecretTap={onSecretTap}>
+      {/* cutia centrală (cadru alb, ca în grafică) */}
+      <div style={{
+        position:"absolute", left:`${D.boxL}%`, top:`${D.boxT}%`,
+        width:`${D.boxW}%`, height:`${D.boxH}%`,
+        border:`${Math.max(2,px(3))}px solid #fff`, borderRadius: px(6),
+        boxShadow: revealed ? `0 0 ${px(30)}px rgba(255,255,255,0.45)` : "none",
+        transition:"box-shadow 0.4s ease", zIndex:6, pointerEvents:"none",
+      }}/>
+
+      {/* rândurile reel-ului */}
+      <div style={{position:"absolute", inset:0, zIndex:5, pointerEvents:"none"}}>
+        {rows.map(r => (
+          <div key={r.idx} style={{
+            position:"absolute", left:"0", width:"100%", textAlign:"center",
+            top:`${(D.cy + r.dist*D.rowH).toFixed(3)}%`,
+            transform:"translateY(-50%)",
+            color:"#fff", opacity:r.op,
+            fontSize: r.isCenter ? fontMain : fontFaded,
+            fontWeight: 900, letterSpacing: px(1),
+            textTransform:"uppercase",
+            textShadow: r.isCenter ? `0 ${px(2)}px ${px(12)}px rgba(0,0,0,0.35)` : "none",
+            whiteSpace:"nowrap", overflow:"hidden",
+          }}>{r.name}</div>
+        ))}
+      </div>
+
+      {/* buton "din nou" — apare după dezvăluire */}
+      {revealed && (
+        <button onClick={onBack} style={{
+          position:"absolute", left:"50%", bottom:`${4}%`, transform:"translateX(-50%)",
+          zIndex:20, cursor:"pointer",
+          background:"rgba(255,255,255,0.95)", color:PEPSI_RED,
+          border:"none", borderRadius: px(40),
+          padding:`${px(14)}px ${px(46)}px`, fontWeight:900, fontSize:px(26),
+          letterSpacing:px(1), boxShadow:`0 ${px(8)}px ${px(24)}px rgba(0,0,0,0.25)`,
+        }}>ÎNCĂ O DATĂ</button>
+      )}
+    </Stage>
+  );
+}
+
+// ─── ADMIN ─────────────────────────────────────────────────────────────────────
+function AdminScreen({ prizes, setPrizes, onBack }) {
+  const [name, setName] = useState("");
+  const [qty,  setQty]  = useState(1);
+
+  const add = () => {
+    if (!name.trim()) return;
+    setPrizes(prev => [...prev, { id: Date.now(), name: name.trim().toUpperCase(), qty: Math.max(0, Number(qty)||0) }]);
+    setName(""); setQty(1);
+  };
+  const setQtyOf = (id, v) => setPrizes(prev => prev.map(p => p.id===id ? {...p, qty: Math.max(0, Number(v)||0)} : p));
+  const del = (id) => setPrizes(prev => prev.filter(p => p.id !== id));
+
+  const totalStock = prizes.reduce((s,p)=>s+Number(p.qty||0),0);
+
+  return (
+    <div style={A.wrap}>
+      <div style={A.inner}>
+        <div style={A.header}>
+          <button style={A.back} onClick={onBack}>← Înapoi</button>
+          <h2 style={A.title}>🛠 Administrare premii</h2>
+        </div>
+
+        <div style={A.card}>
+          <h3 style={A.cardTitle}>➕ Adaugă premiu</h3>
+          <input style={A.input} placeholder="Nume premiu (ex: VOUCHER 100 RON)"
+            value={name} onChange={e=>setName(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&add()}/>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginTop:6}}>
+            <label style={A.lbl}>Stoc / cantitate:</label>
+            <input type="number" min={0} style={{...A.input,width:110,marginBottom:0}}
+              value={qty} onChange={e=>setQty(e.target.value)}/>
+            <button style={A.btnAdd} onClick={add}>Adaugă</button>
+          </div>
+        </div>
+
+        <div style={A.card}>
+          <h3 style={A.cardTitle}>🎁 Premii ({prizes.length}) · stoc total: {totalStock}</h3>
+          {prizes.length===0 && <p style={A.empty}>Niciun premiu. Adaugă mai sus.</p>}
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {prizes.map(p => (
+              <div key={p.id} style={{...A.row, opacity: p.qty>0?1:0.5}}>
+                <span style={A.pname}>{p.name}{p.qty===0 && <span style={A.outBadge}>STOC 0</span>}</span>
+                <div style={A.actions}>
+                  <div style={A.qtyBox}>
+                    <button style={A.qBtn} onClick={()=>setQtyOf(p.id, Number(p.qty)-1)}>−</button>
+                    <input style={A.qInput} type="number" min={0} value={p.qty}
+                      onChange={e=>setQtyOf(p.id, e.target.value)}/>
+                    <button style={A.qBtn} onClick={()=>setQtyOf(p.id, Number(p.qty)+1)}>+</button>
+                  </div>
+                  <button style={A.del} onClick={()=>del(p.id)}>🗑️</button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p style={A.hint}>Premiile se acordă aleatoriu doar dintre cele cu stoc &gt; 0. La fiecare câștig stocul scade automat.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PASSWORD MODAL ──────────────────────────────────────────────────────────
+function PwdModal({ value, setValue, err, setErr, onLogin, onClose }) {
+  return (
+    <div style={A.modalBg}>
+      <div style={A.modalCard}>
+        <h3 style={{color:"#fff",fontSize:20,fontWeight:900,margin:"0 0 14px"}}>🔒 Acces administrator</h3>
+        <input style={A.input} type="password" placeholder="Parolă..." autoFocus value={value}
+          onChange={e=>{setValue(e.target.value);setErr(false);}}
+          onKeyDown={e=>e.key==="Enter"&&onLogin()}/>
+        {err && <p style={{color:"#ffd0d0",fontSize:13,marginTop:2}}>Parolă incorectă.</p>}
+        <div style={{display:"flex",gap:8,marginTop:14}}>
+          <button style={A.btnAdd} onClick={onLogin}>Intră</button>
+          <button style={{...A.btnAdd,background:"rgba(255,255,255,0.18)",color:"#fff"}} onClick={onClose}>Anulează</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── APP ───────────────────────────────────────────────────────────────────────
+function App() {
+  const [screen, setScreen] = useState("start");      // start | result | admin
+  const [prizes, setPrizes] = useState(loadPrizes() || INITIAL_PRIZES);
+  const [scale,  setScale]  = useState(1);
+  const [showPwd, setShowPwd] = useState(false);
+  const [pwd, setPwd] = useState(""); const [pwdErr, setPwdErr] = useState(false);
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(prizes)); } catch(e){}
+  }, [prizes]);
+
+  // acces secret admin: 4 tap-uri rapide în colțul dreapta-sus
+  const taps = useRef(0); const tt = useRef(null);
+  const secretTap = () => {
+    taps.current++; clearTimeout(tt.current);
+    tt.current = setTimeout(()=>{taps.current=0;}, 1400);
+    if (taps.current >= 4) { taps.current = 0; setShowPwd(true); }
+  };
+  const login = () => {
+    if (pwd === ADMIN_PWD) { setScreen("admin"); setShowPwd(false); setPwd(""); setPwdErr(false); }
+    else setPwdErr(true);
+  };
+  const closePwd = () => { setShowPwd(false); setPwd(""); setPwdErr(false); };
+
+  const winPrize = (id) => setPrizes(prev => prev.map(p => p.id===id ? {...p, qty: Math.max(0, p.qty-1)} : p));
+
+  const modal = showPwd && <PwdModal value={pwd} setValue={setPwd} err={pwdErr} setErr={setPwdErr} onLogin={login} onClose={closePwd}/>;
+
+  if (screen === "admin")
+    return <AdminScreen prizes={prizes} setPrizes={setPrizes} onBack={()=>setScreen("start")}/>;
+
+  if (screen === "result")
+    return <>
+      <ResultScreen scale={scale} setScale={setScale} prizes={prizes} onWin={winPrize}
+        onBack={()=>setScreen("start")} onSecretTap={secretTap}/>
+      {modal}
+    </>;
+
+  return <>
+    <StartScreen scale={scale} setScale={setScale} onStart={()=>setScreen("result")} onSecretTap={secretTap}/>
+    {modal}
+  </>;
+}
+
+// ─── ADMIN STYLES ──────────────────────────────────────────────────────────────
+const A = {
+  wrap:{minHeight:"100vh",width:"100vw",overflowY:"auto",background:`linear-gradient(160deg,#0a17e0,#0008c8 60%,#000a8c)`,fontFamily:"system-ui,'Segoe UI',sans-serif"},
+  inner:{maxWidth:760,margin:"0 auto",padding:"22px 16px 70px"},
+  header:{display:"flex",alignItems:"center",gap:14,marginBottom:20},
+  back:{background:"rgba(255,255,255,0.18)",border:"1px solid rgba(255,255,255,0.3)",color:"#fff",borderRadius:40,padding:"8px 18px",cursor:"pointer",fontSize:14,fontWeight:700},
+  title:{color:"#fff",fontSize:22,fontWeight:900,margin:0},
+  card:{background:"rgba(255,255,255,0.10)",border:"1px solid rgba(255,255,255,0.22)",borderRadius:18,padding:20,marginBottom:16,backdropFilter:"blur(8px)"},
+  cardTitle:{color:"#fff",fontWeight:800,fontSize:16,margin:"0 0 14px"},
+  input:{width:"100%",background:"rgba(255,255,255,0.14)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:10,padding:"11px 14px",color:"#fff",fontSize:15,marginBottom:0,outline:"none"},
+  lbl:{color:"rgba(255,255,255,0.85)",fontSize:14,whiteSpace:"nowrap"},
+  btnAdd:{background:"#fff",color:PEPSI_RED,border:"none",borderRadius:40,padding:"11px 26px",fontWeight:800,fontSize:14,cursor:"pointer",whiteSpace:"nowrap"},
+  empty:{color:"rgba(255,255,255,0.7)",fontSize:14,textAlign:"center",padding:"8px 0"},
+  row:{background:"rgba(255,255,255,0.10)",border:"1px solid rgba(255,255,255,0.18)",borderRadius:12,padding:"12px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12},
+  pname:{color:"#fff",fontWeight:700,fontSize:15,display:"flex",alignItems:"center",gap:8},
+  outBadge:{fontSize:11,fontWeight:800,color:"#ffd0d0",background:"rgba(235,25,51,0.35)",borderRadius:6,padding:"2px 7px"},
+  actions:{display:"flex",alignItems:"center",gap:10,flexShrink:0},
+  qtyBox:{display:"flex",alignItems:"center",gap:2,background:"rgba(0,0,0,0.25)",borderRadius:10,padding:"3px 5px"},
+  qBtn:{background:"none",border:"none",color:"#fff",fontSize:20,lineHeight:1,cursor:"pointer",fontWeight:800,width:28},
+  qInput:{width:52,background:"transparent",border:"none",color:"#fff",fontSize:15,fontWeight:800,textAlign:"center",outline:"none"},
+  del:{background:"rgba(235,25,51,0.25)",border:"none",borderRadius:8,padding:"7px 11px",cursor:"pointer",fontSize:15},
+  hint:{color:"rgba(255,255,255,0.6)",fontSize:12,marginTop:12,lineHeight:1.5},
+  modalBg:{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:20},
+  modalCard:{background:`linear-gradient(140deg,#0a17e0,#000a8c)`,border:"1px solid rgba(255,255,255,0.3)",borderRadius:18,padding:26,width:"100%",maxWidth:360},
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
